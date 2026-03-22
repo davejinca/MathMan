@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Math-Man: Retro Edition</title>
+    <style>
+        :root {
+            --bg-color: #000;
+            --wall-color: #2121ff;
+            --text-color: #ffff00;
+            --font-main: 'Courier New', Courier, monospace;
+        }
+
+        body {
+            background-color: #111;
+            color: white;
+            font-family: var(--font-main);
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        #game-container {
+            position: relative;
+            border: 4px solid var(--wall-color);
+            background-color: black;
+            width: 570px;
+            height: 450px;
+        }
+
+        canvas {
+            display: block;
+        }
+
+        #ui-layer {
+            position: absolute;
+            top: -60px;
+            left: 0;
+            width: 100%;
+            height: 50px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-weight: bold;
+            font-size: 18px;
+        }
+
+        .screen {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.9);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 20;
+            text-align: center;
+        }
+
+        h1 {
+            color: var(--text-color);
+            font-size: 48px;
+            margin: 0;
+            text-shadow: 2px 2px #ff0000;
+        }
+
+        button {
+            background: transparent;
+            color: #fff;
+            padding: 15px 30px;
+            font-size: 24px;
+            font-family: var(--font-main);
+            cursor: pointer;
+            border: 2px solid var(--text-color);
+            margin-top: 30px;
+            animation: blink 0.8s infinite;
+        }
+
+        @keyframes blink {
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0;
+            }
+        }
+
+        .hidden {
+            display: none !important;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div id="game-container">
+        <div id="ui-layer">
+            <div style="color: #fff;">UP-1 <br> <span id="score-el">00</span></div>
+            <div id="question-display" style="color: #ffff00; font-size: 20px;">READY?</div>
+            <div style="color: #fff; text-align: right;">HI-SCORE <br> <span id="hi-score-el">00</span></div>
+        </div>
+        <canvas id="gameCanvas" width="570" height="450"></canvas>
+
+        <div id="start-screen" class="screen">
+            <h1>MATH-MAN</h1>
+            <button id="start-btn">INSERT COIN</button>
+        </div>
+
+        <div id="game-over-screen" class="screen hidden">
+            <h1 style="color: red;">GAME OVER</h1>
+            <p>SCORE: <span id="final-score">0</span></p>
+            <button id="restart-btn">PLAY AGAIN</button>
+        </div>
+    </div>
+
+    <script>
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        function playSound(freq, type, duration, vol = 0.1) {
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = type;
+            osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+            gain.gain.setValueAtTime(vol, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + duration);
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.start();
+            osc.stop(audioCtx.currentTime + duration);
+        }
+
+        const TILE = 30;
+        const PAC_SPEED = 0.12;
+        const GHOST_SPEED = 0.045;
+
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        let grid = [], answerNodes = [], gameState = 'START';
+        let score = 0, lives = 3, hiScore = localStorage.getItem('mathman-hiscore') || 0;
+        let player, ghosts = [], mathProblem = {};
+        let scaredTimer = 0, stunTimer = 0;
+
+        const rawMap = [
+            "0000000000000000000",
+            "0311111110111111130",
+            "0100100010100010010",
+            "0100100010100010010",
+            "0111111111111111110",
+            "0100101000001010010",
+            "0111131110111311110",
+            "0000100022200010000",
+            "0000102222222010000",
+            "0111102000002011110",
+            "0100102022202010010",
+            "0311112222222111130",
+            "0100100000000010010",
+            "0111111111111111110",
+            "0000000000000000000"
+        ];
+
+        class Entity {
+                constructor(x, y, speed) {
+                    this.x = x; this.y = y; this.speed = speed;
+                    this.dir = { x: 0, y: 0 }; this.nextDir = { x: 0, y: 0 };
+                }
+                // Helper to see if a specific tile is walkable
+                isWalkable(tx, ty) {
+                    const x = Math.round(tx);
+                    const y = Math.round(ty);
+                    return (grid[y] && grid[y][x] !== 0);
+                }
+            }
+
+            class Pacman extends Entity {
+                constructor() { super(9, 13, PAC_SPEED); }
+                update() {
+                    if (stunTimer > 0) { stunTimer--; return; }
+
+                    // 1. Try to change direction if user pressed a key
+                    if (this.nextDir.x !== 0 || this.nextDir.y !== 0) {
+                        // Only allow turn if near center of tile and target is not a wall
+                        if (Math.abs(this.x - Math.round(this.x)) < 0.2 && Math.abs(this.y - Math.round(this.y)) < 0.2) {
+                            if (this.isWalkable(Math.round(this.x) + this.nextDir.x, Math.round(this.y) + this.nextDir.y)) {
+                                this.x = Math.round(this.x);
+                                this.y = Math.round(this.y);
+                                this.dir = { ...this.nextDir };
+                                this.nextDir = { x: 0, y: 0 };
+                            }
+                        }
+                    }
+
+                    // 2. Wall Collision: Look slightly ahead
+                    if (!this.isWalkable(this.x + this.dir.x * 0.5, this.y + this.dir.y * 0.5)) {
+                        this.x = Math.round(this.x);
+                        this.y = Math.round(this.y);
+                        this.dir = { x: 0, y: 0 };
+                    }
+
+                    this.x += this.dir.x * this.speed;
+                    this.y += this.dir.y * this.speed;
+
+                    // Pellets and Math logic...
+                    const gx = Math.round(this.x), gy = Math.round(this.y);
+                    if (grid[gy] && grid[gy][gx] === 1) {
+                        grid[gy][gx] = 2; score += 10;
+                        playSound(440, 'square', 0.05, 0.05);
+                        updateHUD();
+                    }
+                    mathProblem.options.forEach(opt => {
+                        if (opt.active && Math.hypot(this.x - opt.x, this.y - opt.y) < 0.6) {
+                            if (opt.val === mathProblem.a) {
+                                score += 200; scaredTimer = 450;
+                                playSound(880, 'sine', 0.2, 0.1);
+                                ghosts.forEach(g => { g.mode = 'scared'; });
+                                generateQuestion();
+                            } else {
+                                stunTimer = 120; opt.active = false;
+                                playSound(150, 'sawtooth', 0.3, 0.1);
+                            }
+                            updateHUD();
+                        }
+                    });
+                }
+                draw() {
+                    const px = this.x * TILE + 15, py = this.y * TILE + 15;
+                    ctx.fillStyle = stunTimer > 0 ? "red" : "#ffff00";
+                    ctx.beginPath(); ctx.arc(px, py, 12, 0.2 * Math.PI, 1.8 * Math.PI);
+                    ctx.lineTo(px, py); ctx.fill();
+                }
+            }
+
+            class Ghost extends Entity {
+                constructor(x, y, color, style) {
+                    super(x, y, GHOST_SPEED);
+                    this.color = color; this.style = style; this.mode = 'chase';
+                    this.dir = { x: 1, y: 0 };
+                }
+                update() {
+                    // 2. Scared ghosts now move at a "crawl" (approx 0.03 speed)
+                    const curSpeed = this.mode === 'scared' ? this.speed * 0.75 : this.speed;
+
+                    const oldX = Math.round(this.x);
+                    const oldY = Math.round(this.y);
+
+                    this.x += this.dir.x * curSpeed;
+                    this.y += this.dir.y * curSpeed;
+
+                    const newX = Math.round(this.x);
+                    const newY = Math.round(this.y);
+
+                    // Decision Point: Only runs when a ghost enters a new tile "center"
+                    if (oldX !== newX || oldY !== newY || (this.dir.x === 0 && this.dir.y === 0)) {
+                        this.x = newX;
+                        this.y = newY;
+
+                        let possible = [{ x: 0, y: -1 }, { x: 0, y: 1 }, { x: -1, y: 0 }, { x: 1, y: 0 }]
+                            .filter(d => {
+                                if (!this.isWalkable(newX + d.x, newY + d.y)) return false;
+                                // Prevents 180-degree turns unless at a dead end
+                                if (d.x === -this.dir.x && d.y === -this.dir.y) return false;
+                                return true;
+                            });
+
+                        if (possible.length === 0) {
+                            possible = [{ x: 0, y: -1 }, { x: 0, y: 1 }, { x: -1, y: 0 }, { x: 1, y: 0 }]
+                                .filter(d => this.isWalkable(newX + d.x, newY + d.y));
+                        }
+
+                        if (this.mode === 'chase') {
+                            let tx = player.x, ty = player.y;
+                            if (this.style === 'flank') { tx += player.dir.x * 2; ty += player.dir.y * 2; }
+                            possible.sort((a, b) => Math.hypot(newX + a.x - tx, newY + a.y - ty) - Math.hypot(newX + b.x - tx, newY + b.y - ty));
+                            this.dir = possible[0] || { x: 0, y: 0 };
+                        } else {
+                            this.dir = possible[Math.floor(Math.random() * possible.length)] || { x: 0, y: 0 };
+                        }
+                    }
+                }
+                draw() {
+                    const px = this.x * TILE + 15, py = this.y * TILE + 15;
+                    ctx.fillStyle = this.mode === 'scared' ? (scaredTimer < 120 && Math.floor(scaredTimer / 10) % 2 === 0 ? "white" : "#2121ff") : this.color;
+                    ctx.beginPath(); ctx.arc(px, py - 2, 12, Math.PI, 0); ctx.lineTo(px + 12, py + 12); ctx.lineTo(px - 12, py + 12); ctx.fill();
+
+                    const eyeXOffset = 5;
+                    const eyeYOffset = -4;
+                    const lookX = this.dir.x * 3;
+                    const lookY = this.dir.y * 3;
+
+                    const drawEye = (side) => {
+                        const ex = px + (side * eyeXOffset);
+                        const ey = py + eyeYOffset;
+                        if (this.mode !== 'scared') {
+                            ctx.fillStyle = "white";
+                            ctx.beginPath(); ctx.ellipse(ex, ey, 5.5, 6.5, 0, 0, Math.PI * 2); ctx.fill();
+                            ctx.fillStyle = "#111";
+                            ctx.beginPath(); ctx.arc(ex + lookX, ey + lookY, 3.5, 0, Math.PI * 2); ctx.fill();
+                            ctx.fillStyle = "white";
+                            ctx.beginPath(); ctx.arc(ex + lookX - 1.2, ey + lookY - 1.2, 1.2, 0, Math.PI * 2); ctx.fill();
+                        } else {
+                            ctx.fillStyle = "white";
+                            ctx.beginPath(); ctx.arc(ex, ey + 2, 3.5, 0, Math.PI * 2); ctx.fill();
+                            ctx.fillStyle = "#ffb8ae";
+                            ctx.beginPath(); ctx.arc(ex, ey + 2, 2, 0, Math.PI * 2); ctx.fill();
+                        }
+                    };
+                    drawEye(-1); drawEye(1);
+                }
+            }
+        function generateQuestion() {
+            const n1 = Math.floor(Math.random() * 7) + 2;
+            const n2 = Math.floor(Math.random() * 8) + 2;
+            const ans = n1 * n2;
+            let opts = [ans, ans + 5, ans - 2, ans + 10].sort(() => Math.random() - 0.5);
+            mathProblem = {
+                q: `${n1} x ${n2}`, a: ans,
+                options: opts.map((v, i) => ({ val: v, x: answerNodes[i].x, y: answerNodes[i].y, active: true }))
+            };
+            document.getElementById('question-display').innerText = `${mathProblem.q} = ?`;
+        }
+
+        function initGame() {
+            audioCtx.resume();
+            grid = []; answerNodes = []; score = 0; lives = 3;
+            rawMap.forEach((row, y) => {
+                let r = [];
+                [...row].forEach((char, x) => {
+                    let v = parseInt(char, 10);
+                    if (v === 3) answerNodes.push({ x, y });
+                    r.push(v === 3 ? 2 : v);
+                });
+                grid.push(r);
+            });
+            player = new Pacman();
+            ghosts = [new Ghost(9, 7, 'red', 'direct'), new Ghost(9, 8, 'pink', 'flank')];
+            generateQuestion();
+            gameState = 'PLAYING';
+            document.querySelectorAll('.screen').forEach(s => s.classList.add('hidden'));
+            loop();
+        }
+
+        function loop() {
+            if (gameState !== 'PLAYING') return;
+            requestAnimationFrame(loop);
+            ctx.fillStyle = "black"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+            grid.forEach((row, y) => row.forEach((v, x) => {
+                if (v === 0) { ctx.strokeStyle = "#2121ff"; ctx.strokeRect(x * TILE + 4, y * TILE + 4, 22, 22); }
+                else if (v === 1) { ctx.fillStyle = "#ffb8ae"; ctx.beginPath(); ctx.arc(x * TILE + 15, y * TILE + 15, 2, 0, 7); ctx.fill(); }
+            }));
+            mathProblem.options.forEach(opt => {
+                if (!opt.active) return;
+                ctx.fillStyle = "white"; ctx.beginPath(); ctx.arc(opt.x * TILE + 15, opt.y * TILE + 15, 13, 0, 7); ctx.fill();
+                ctx.fillStyle = "black"; ctx.font = "bold 13px Arial"; ctx.textAlign = "center"; ctx.fillText(opt.val, opt.x * TILE + 15, opt.y * TILE + 20);
+            });
+            if (scaredTimer > 0) { scaredTimer--; if (scaredTimer === 0) ghosts.forEach(g => g.mode = 'chase'); }
+            player.update(); player.draw();
+            ghosts.forEach(g => {
+                g.update(); g.draw();
+                if (Math.hypot(player.x - g.x, player.y - g.y) < 0.8) {
+                    if (g.mode === 'scared') {
+                        score += 200; g.x = 9; g.y = 8; g.mode = 'chase';
+                        playSound(1200, 'sine', 0.1, 0.1);
+                    } else if (stunTimer <= 0) {
+                        lives--; playSound(100, 'sawtooth', 0.5, 0.2);
+                        if (lives <= 0) {
+                            gameState = 'GAMEOVER';
+                            if (score > hiScore) localStorage.setItem('mathman-hiscore', score);
+                            document.getElementById('game-over-screen').classList.remove('hidden');
+                            document.getElementById('final-score').innerText = score;
+                        } else { player.x = 9; player.y = 13; stunTimer = 60; }
+                    }
+                    updateHUD();
+                }
+            });
+        }
+
+        function updateHUD() {
+            document.getElementById('score-el').innerText = score;
+            document.getElementById('hi-score-el').innerText = Math.max(score, hiScore);
+        }
+
+        window.addEventListener('keydown', e => {
+            const k = e.key;
+            if (k.includes('Up') || k === 'w') player.nextDir = { x: 0, y: -1 };
+            if (k.includes('Down') || k === 's') player.nextDir = { x: 0, y: 1 };
+            if (k.includes('Left') || k === 'a') player.nextDir = { x: -1, y: 0 };
+            if (k.includes('Right') || k === 'd') player.nextDir = { x: 1, y: 0 };
+        });
+
+        document.getElementById('start-btn').onclick = initGame;
+        document.getElementById('restart-btn').onclick = initGame;
+        updateHUD();
+    </script>
+</body>
+
+</html>
